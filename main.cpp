@@ -1,5 +1,7 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3dx11.lib")
+#pragma comment(lib, "dxgi.lib")
+
 
 #include <tchar.h>
 #include <Windows.h>
@@ -33,11 +35,12 @@ ID3D11DepthStencilView* g_pDepthStencilView = nullptr; //深度/ステンシルビュー
 //プロトタイプ宣言
 void InitWindow(); //ウィンドウ生成
 HRESULT InitD3D(); //D3D初期化
+HRESULT InitBackBuffer(); //バックバッファの初期化
+void Clear(); //画面クリア
+HRESULT Flip(); //画面表示
 void CleanupD3D(); //D3D後処理
 bool DeviceRemoveProc(); //デバイス消失処理
 
-void Clear(); //画面クリア
-HRESULT Flip(); //画面表示
 
 //エントリポイント
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
@@ -74,12 +77,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 //ウィンドウプロシージャ
 LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+	
+	HRESULT hr;
+	BOOL fullscreen;
+	
 	//メッセージ処理
 	switch (uMsg) {
 	case WM_DESTROY:
+		//Direct3Dの終了処理
+		CleanupD3D();
+		//ウィンドウを閉じる
 		PostQuitMessage(0);
+		g_Hwnd = NULL;
 		break;
+
+	case WM_SIZE: //サイズ変更処理
+		if (!g_pD3DDevice || wParam == SIZE_MINIMIZED)
+			break;
+		g_pImmediateContext->OMSetRenderTargets(0, NULL, NULL); //描画ターゲットの解除
+		SAFE_RELEASE(g_pRenderTargetView); //描画ターゲットビューの開放
+
+		g_pSwapChain->ResizeBuffers(1, 0, 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0);//バッファの変更
+
+		//バックバッファの初期化
+		InitBackBuffer();
+		break;
+
+	case WM_KEYDOWN: //キーの入力処理
+		switch (wParam) {
+		case VK_ESCAPE:
+			PostMessage(hWnd, WM_CLOSE, 0, 0);
+			break;
+
+		case VK_F5: //画面モードの切り替え
+			if (g_pSwapChain != NULL) {
+				g_pSwapChain->GetFullscreenState(&fullscreen, NULL);
+				g_pSwapChain->SetFullscreenState(!fullscreen, NULL);
+			}
+			break;
+		}
 	}
+	//デフォルト処理
 	return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
@@ -256,40 +294,39 @@ HRESULT InitD3D() {
 	return S_OK;
 }
 
-//後処理
-void CleanupD3D() {
-	//ステートのクリア
-	if (g_pImmediateContext)
-		g_pImmediateContext->ClearState();
+HRESULT InitBackBuffer() {
+	HRESULT hr;
 
-	//インターフェイスの解放
-	SAFE_RELEASE(g_pDepthStencilView);
-	SAFE_RELEASE(g_pDepthStencil);
-	SAFE_RELEASE(g_pRenderTargetView);
-	SAFE_RELEASE(g_pSwapChain);
-	SAFE_RELEASE(g_pImmediateContext);
-	SAFE_RELEASE(g_pD3DDevice);
-}
+	//バックバッファを描画ターゲットに設定
+	//スワップチェインから最初のバックバッファを取得する
+	ID3D11Texture2D* pBackBuffer; //バッファのアクセスに使うインターフェイス(バッファを2Dテクスチャとして扱う)
+	hr = g_pSwapChain->GetBuffer(
+		0,
+		__uuidof(ID3D11Texture2D), //バッファにアクセスするインターフェイス
+		(LPVOID*)&pBackBuffer //バッファを受け取る変数
+	);
+	if (FAILED(hr))
+		return E_FAIL;
 
-//デバイス消失処理
-bool DeviceRemoveProc() {
-	HRESULT hr = g_pD3DDevice->GetDeviceRemovedReason();
-	switch (hr) {
-	case S_OK:
-		break;
-	case DXGI_ERROR_DEVICE_HUNG:
-	case DXGI_ERROR_DEVICE_RESET:
-		CleanupD3D();
-		hr = InitD3D();
-		if (FAILED(hr))
-			return true;
-	case DXGI_ERROR_DEVICE_REMOVED:
-	case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
-	case DXGI_ERROR_INVALID_CALL:
-	default:
-		return true;
-	}
-	return false;
+	//バックバッファの描画ターゲットビューを作る
+	hr = g_pD3DDevice->CreateRenderTargetView(
+		pBackBuffer, //ビューでアクセスするリソース
+		NULL, //描画ターゲットビューの定義
+		&g_pRenderTargetView //描画ターゲットビューを受け取る関数
+	);
+	SAFE_RELEASE(pBackBuffer); //以降バックバッファは直接使わないので解散
+	if (FAILED(hr))
+		return E_FAIL;
+
+	//ビューポートの設定
+	g_ViewPort[0].TopLeftX = 0.0f;
+	g_ViewPort[0].TopLeftY = 0.0f;
+	g_ViewPort[0].Width = 640.0f;
+	g_ViewPort[0].Height = 480.0f;
+	g_ViewPort[0].MinDepth = 0.0f;
+	g_ViewPort[0].MaxDepth = 1.0f;
+
+	return S_OK;
 }
 
 //クリア
@@ -318,4 +355,44 @@ HRESULT Flip() {
 		0 //画面を実際に更新する
 	);
 	return hr;
+}
+
+//デバイス消失処理
+bool DeviceRemoveProc() {
+	HRESULT hr = g_pD3DDevice->GetDeviceRemovedReason();
+	switch (hr) {
+	case S_OK:
+		break;
+	case DXGI_ERROR_DEVICE_HUNG:
+	case DXGI_ERROR_DEVICE_RESET:
+		CleanupD3D();
+		hr = InitD3D();
+		if (FAILED(hr))
+			return true;
+	case DXGI_ERROR_DEVICE_REMOVED:
+	case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
+	case DXGI_ERROR_INVALID_CALL:
+	default:
+		return true;
+	}
+	return false;
+}
+
+//後処理
+void CleanupD3D() {
+	//ステートのクリア
+	if (g_pImmediateContext)
+		g_pImmediateContext->ClearState();
+
+	//スワップチェインをウィンドウモードにする
+	if (g_pSwapChain)
+		g_pSwapChain->SetFullscreenState(FALSE, NULL);
+
+	//インターフェイスの解放
+	SAFE_RELEASE(g_pDepthStencilView);
+	SAFE_RELEASE(g_pDepthStencil);
+	SAFE_RELEASE(g_pRenderTargetView);
+	SAFE_RELEASE(g_pSwapChain);
+	SAFE_RELEASE(g_pImmediateContext);
+	SAFE_RELEASE(g_pD3DDevice);
 }
